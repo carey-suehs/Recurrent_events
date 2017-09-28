@@ -1,0 +1,632 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+```{r}
+pacman::p_load(knitr)
+```
+
+
+At the beginning of the ILLUSTRATIVE EXAMPLE section, Dong et al desribe trajectories for 5 patients. Here, I create fictive data that reflect this example, but in a table format one might encounter in real life. I assume the time unit corresponds to days.
+
+So first, I construct a table "fup" (for "follow-up") that will contain:
+
+* a list of patient identifiers ("patient"), 
+* the date of start of follup for each patient ("d0"),
+* the date when a competing risk occurs if any ("cr"),   !!this is often death!!
+* the date when end of follow-up occurs (right-censoring) if no competing risk event happens ("dstop").
+
+Note that there can be only one competing risk date or one censoring date for each patient, but not both.
+
+```{r}
+patients <- c("C01P01",
+              "C01P02",
+              "C02P01",
+              "C02P02",
+              "C02P03")
+
+d0 <- as.Date(c("2017-09-07",
+                      "2017-08-07",
+                      "2017-08-23",
+                      "2017-08-30",
+                      "2017-09-15"))
+cr <- as.Date(c(NA, NA, "2017-08-29", NA, "2017-09-20"))
+
+dstop <- as.Date(c("2017-09-16", "2017-08-09", NA, "2017-09-08", NA))
+
+fup <- data.frame(patients, d0, cr, dstop)
+
+
+
+kable(fup)
+```
+
+Next we need the dates as which events of interest occur for each patient. This might occur as an "events" table composed of:
+
+* a list of patient identifiers ("patient"), 
+* the date of each event ("ev"). 
+
+Note that this is a 1:many situation; each patient can experience several events. Also, the patients variable is the key for linking the two tables.
+
+```{r}
+patients <- c(rep("C02P02",3),"C02P03")
+ev <- as.Date(c("2017-09-02",
+                "2017-09-06",
+                "2017-09-07",
+                "2017-09-19"))
+events <- data.frame(patients, ev)
+
+rm(patients)
+
+kable(events)
+```
+
+Now let's find the maximum number of days of follow-up (t) for our patients.
+
+```{r}
+temp_cr <- fup[,c("patients", "cr")]
+temp_cr <- temp_cr[complete.cases(temp_cr),]
+temp_stop <- fup[,c("patients", "dstop")]
+temp_stop <- temp_stop[complete.cases(temp_stop),]
+
+colnames(temp_cr) <- c("patients", "crstop")
+colnames(temp_stop) <- c("patients", "crstop")
+crstop <- rbind(temp_cr, temp_stop)
+
+fup <- merge(fup, crstop, by = "patients")
+
+rm(temp_cr, temp_stop, crstop, cr, d0, dstop, ev)  #clean up
+
+t <- as.integer(max(fup$crstop - fup$d0))
+
+t
+```
+
+Now lets start creating and filling in patient x day matrices, starting with an events matrix.
+
+```{r}
+matrix_events <- data.frame(matrix(ncol = t, nrow = length(fup$patients)))
+row.names(matrix_events) <- fup$patients
+
+temp <- fup[,c("patients", "d0")]
+events <- merge(events, temp, by = "patients")
+rm(temp)
+
+events$d <- events$ev - events$d0
+events$patients <- as.character(events$patients)
+events$d <- as.integer(events$d)
+
+for (i in 1:length(events$patients)) {
+    pi = events[i, c("patients")]
+    day = events[i,c("d")]
+    day2 = paste("X", day, sep = "")
+
+    if (is.na(matrix_events[pi, day2])) {
+        matrix_events[pi, day2] <- 1
+    } else {
+        matrix_events[pi, day2] <- matrix_events[pi, day2] + 1
+    }
+}
+
+rm(day, day2, i, pi)
+
+#rename the days
+
+dnames <- c()
+for (i in 1:t) {
+    name_temp <- paste("d",i-1, sep = "")
+    dnames[i] <- name_temp
+}
+
+colnames(matrix_events) <- dnames
+
+head(matrix_events)
+```
+
+Now lets make and fill in a competing risk matrix.
+```{r}
+
+matrix_crisk <- data.frame(matrix(ncol = t, nrow = length(fup$patients)))
+row.names(matrix_crisk) <- fup$patients
+
+fup$cr_day <- as.integer(fup$cr - fup$d0)
+
+temp <- fup[, c("patients", "cr_day")]
+temp <- temp[complete.cases(temp),]
+
+for (i in 1:length(temp$patients)) {
+    pi <- as.character(temp[i, c("patients")])
+    day <- temp[i,c("cr_day")]
+    day2 <- paste("X", day, sep = "")
+
+    matrix_crisk[pi, day2] <- 1
+}
+
+rm(temp, day, day2, i, pi)
+colnames(matrix_crisk) <- dnames
+
+head(matrix_crisk)
+
+```
+
+Now lets make and fill in a censoring matrix.
+
+```{r}
+
+matrix_censor <- data.frame(matrix(ncol = t, nrow = length(fup$patients)))
+row.names(matrix_censor) <- fup$patients
+
+fup$censor_day <- as.integer(fup$dstop - fup$d0)
+
+temp <- fup[, c("patients", "censor_day")]
+temp <- temp[complete.cases(temp),]
+
+for (i in 1:length(temp$patients)) {
+    pi <- as.character(temp[i, c("patients")])
+    day <- temp[i,c("censor_day")]
+    day2 <- paste("X", day, sep = "")
+
+    matrix_censor[pi, day2] <- 1
+}
+
+rm(temp, day, day2, i, pi)
+
+colnames(matrix_censor) <- dnames
+
+head(matrix_censor)
+```
+
+Let 'e' be the number of events of interest occurring at time 't'.
+
+```{r}
+e <- sapply(matrix_events, sum, na.rm = TRUE)
+e
+```
+
+
+Let 'r' be the number of individuals who experience a competing-risk event at time 't'.
+
+```{r}
+r <- sapply(matrix_crisk, sum, na.rm = TRUE)
+r
+
+```
+
+Let 'c' by the number of individuals who are censored at time 't'.
+
+```{r}
+c <- sapply(matrix_censor, sum, na.rm = TRUE)
+c
+```
+
+Let 'n' be the number of individuals who are at risk and under observation in the study beyond time 't'.
+
+```{r}
+n0 <- length(fup$patients)
+n <- n0-cumsum(r+c)
+n
+```
+
+Let "n_before" be the number of individuals who are at risk and under observation the day before 't'.
+
+```{r}
+
+n_before <- c()
+n_before[1] <- n0
+n_before[2:(t+1)] <- n
+n_before <- head(n_before, -1)
+n_before
+```
+
+We will also need to determe 's' such that the larget tj is < t. This means finding the highest time index corresponding to any of 3 kinds of happenings/events up to t-1:
+
+* events of interest,
+* occurrence of a competing risk event,
+* censoring.
+
+```{r}
+
+s_temp <- e + r + c
+s <- c()
+
+for (i in 1:t){
+    
+    if (i == 1) {
+        vec <- 0
+    } else {
+        vec <- s_temp[1:i-1]}
+    
+    if (sum(vec) == 0){
+        s[i] <- 0
+    } else{
+        s[i] <- max(which(vec > 0))}
+}
+rm(s_temp)
+s
+
+```
+
+
+Let 'KM' be the estimator of survival probability at time 't'.  
+
+```{r}
+
+KM_temp <- cumprod(1-r/n_before)
+
+KM <- c()
+
+for (i in 1:t) {
+    if (s[i] == 0){
+        KM[i] <- KM_temp[1]
+    } else {
+        KM[i] <- KM_temp[s[i]]
+    }
+}
+
+KM
+```
+
+Let 'MCC' be the mean cumulative count at time 't'.
+
+```{r}
+MCC <- cumsum((e/n_before)*KM)
+
+rm(i, name_temp)       #do some cleanup
+
+MCC
+```
+
+
+Now we want to start shaping data in order to find CumI for the first event, the second event, and so forth.  However, keep in mind that in these "nth" event cases, data for competing risks or censoring occuring after the nth event should be removed.  We will need a series of a series of matrices for calculating CumIs:
+
+* matrix_e1, matrix_e2 etc.  (1s for the occurrences of nth events)
+* matrix_cr1, matrix_cr2 etc (1s for occurrences of death before the nth event of interest)
+* matrix_cen1, matrix_cen2 etc (1s for end of follow-up before the nth event of interest)
+
+First, let's find the maximum number of events 'm' for a given patient in the study.
+
+```{r}
+m <- max(rowSums(matrix_events, na.rm = TRUE))
+m
+```
+
+
+Create event matrices for each mth event.
+```{r}
+
+for (i in 1:m) {
+    
+    x <- data.frame(matrix(ncol = t, nrow = length(fup$patients)))
+    row.names(x) <- fup$patients 
+    colnames(x) <- dnames 
+    
+    for (j in 1:dim(matrix_events)[1]){
+        
+        pi <- row.names(matrix_events)[j]  
+        svec <- as.numeric(matrix_events[pi,])
+        svec[is.na(svec)] <- 0
+        svec <- cumsum(svec)
+        if (sum(svec) >= i) {
+            yindex <- min(which(svec == i))    
+            if (yindex != Inf) {
+                x[pi, yindex] <- 1   
+            }
+        } 
+    }
+        
+    mname <- paste("matrix_e", i, sep = "")
+    assign(mname,x)
+}
+
+head(matrix_e1)
+
+
+
+```
+
+Now let's create the competing risk matrices corresponding to nth cases. Patients cannot have both an event 'n' and a competing risk, so data needs to be removed from the competing risks matrices.
+
+```{r}
+
+for (i in 1:m){
+    mat_temp <- matrix_crisk
+    #find patient identifiers for events
+    e_temp <- get(paste("matrix_e", i, sep = ""))
+    xxx <- rowSums(e_temp, na.rm = TRUE)
+    zzz <- names(which(xxx > 0))
+    for (j in 1:length(zzz)){
+        mat_temp[zzz[j],] <- NA 
+    }
+    
+    crname <- paste("matrix_cr", i, sep = "")
+    assign(crname, mat_temp)
+    
+}
+
+head(matrix_cr1)
+```
+
+Now let's create the censoring matrices corresponding to nth cases. Patients cannot have both an event and censoring, since occurrence of the nth event halts followup, so data needs to be removed from the censoring matrices.
+
+```{r}
+for (i in 1:m){
+    mat_temp <- matrix_censor
+    #find patient identifiers for events
+    e_temp <- get(paste("matrix_e", i, sep = ""))
+    xxx <- rowSums(e_temp, na.rm = TRUE)
+    zzz <- names(which(xxx > 0))
+    for (j in 1:length(zzz)){
+        mat_temp[zzz[j],] <- NA 
+    }
+    
+    cenname <- paste("matrix_cen", i, sep = "")
+    assign(cenname, mat_temp)
+    
+}
+
+head(matrix_cen1)
+```
+
+
+Let 'e1' to 'em' be the number of e1 to em events of interest occurring at time 't'.
+
+```{r}
+
+for (i in 1:m) {
+    ex <- sapply(get(paste("matrix_e", i, sep = "")), sum, na.rm = TRUE)
+    ename <- paste("e", i, sep="")
+    assign(ename, ex)
+}
+
+e1
+e2
+e3
+```
+
+
+Let 'cr1' to 'crm' be the corresponding number of competing risk events occurring at time 't'.
+
+```{r}
+for (i in 1:m) {
+    rx <- sapply(get(paste("matrix_cr", i, sep = "")), sum, na.rm = TRUE)
+    rname <- paste("r", i, sep="")
+    assign(rname, rx)
+}
+
+r1
+r2
+r3
+```
+
+Let 'cen1' to 'cenm' be the corresponding number of censoring events occurring at time 't'.
+
+```{r}
+for (i in 1:m) {
+    cx <- sapply(get(paste("matrix_cen", i, sep = "")), sum, na.rm = TRUE)
+    cname <- paste("cen", i, sep="")
+    assign(cname, cx)
+}
+
+cen1
+```
+
+
+Let 'nno' be the number of persons with no nth events, no competing risks and no censoring at time 't'. And as previously, the "before" variables will indicate similar data at the day before t.
+
+
+```{r, echo=TRUE}
+
+for (i in 1:m) {
+    
+    e_temp <- get(paste("e", i, sep=""))
+    r_temp <- get(paste("r", i, sep=""))
+    c_temp <- get(paste("cen", i, sep=""))
+    nnox <- n0 - cumsum(e_temp + r_temp + c_temp)
+    nnoname <- paste("nno", i, sep="")
+    assign(nnoname, nnox)
+    
+    nnobeforename <- paste("nno_before_", i, sep="")
+    nnoxbefore <- c()
+    nnoxbefore[1] <- n0
+    nnoxbefore[2:(t+1)] <- nnox[1:t]
+    nnoxbefore <- head(nnoxbefore, -1)
+    assign(nnobeforename, nnoxbefore)
+}
+
+nno1
+nno_before_1
+
+e1
+
+```
+
+Now before calculating CumI indices, we need to figure out those litte "s"'s.
+
+
+```{r}
+
+for  (i in 1:m) {
+    
+    e_temp <- get(paste("e", i, sep=""))
+    r_temp <- get(paste("r", i, sep=""))
+    c_temp <- get(paste("cen", i, sep=""))
+    s_temp <- e_temp + r_temp + c_temp
+    s_temp2 <- c()
+    
+    for (l in 1:t){
+    
+        if (l == 1) {
+            vec <- 0
+        } else {
+            vec <- s_temp[1:l-1]}
+    
+        if (sum(vec) == 0){
+            s_temp2[l] <- 0
+        } else{
+            s_temp2[l] <- max(which(vec > 0))}}
+    
+    
+    s_name <- paste("s",i,sep = "")
+    assign(s_name, s_temp2)
+}
+
+s1
+s2
+s3
+```
+
+
+Let "CumI_2" be the cumulative probability of the second event of interest over time. 
+
+```{r, echo=TRUE}
+
+for (i in 1:m){
+    
+    e_temp <- get(paste("e", i, sep=""))
+    nno_before_temp <- get(paste("nno_before_", i, sep=""))
+    r_temp <- get(paste("r", i, sep=""))   
+    s_temp <- get(paste("s",i,sep = ""))
+    
+    #Calculate 'A' the first factor in CumI, which is sum from 1 to s of e/nbefore.
+    
+    A_temp <- cumsum(e_temp/nno_before_temp)
+    A_temp
+    A <- c()
+    
+    for (j in 1:t){
+        if (s_temp[j] == 0){
+            A[j] <- A_temp[1]
+        } else {
+            A[j] <- A_temp[s_temp[j]]
+        }
+    }
+    
+    A
+    
+    #Calculate 'B' the second factor in CumI, which is product from 1 to t-1 of the complement of e/nbefore.
+    
+    B_temp <- cumprod(1-e_temp/nno_before_temp)
+    B_temp
+    
+    B <- c()
+    
+    for (k in 1:t){
+        if (k == 1){
+            B[k] <- 1
+        } else {
+            B[k] <- B_temp[k-1]
+        }
+    }
+    
+    B
+    
+    #Calculate 'C' the third factor in CumI, which is product from 1 to t-1 of the complement of r/nbefore.
+    
+    C_temp <- cumprod(1-r_temp/nno_before_temp)
+    C_temp
+    
+    C <- c()
+    
+    for (k in 1:t){
+        if (k == 1){
+            C[k] <- 1
+        } else {
+            C[k] <- C_temp[k-1]
+        }
+    }
+    
+    C
+    cumi_temp <- A * B * C
+    
+    cuminame <- paste("CumI_",i,sep = "")
+    
+    assign(cuminame, cumi_temp)
+}
+
+
+
+
+```
+
+
+Now look at the sum of CumIs.
+
+```{r}
+CumI_1+CumI_2+CumI_3
+MCC
+```
+
+
+OK lets do everything without s.
+
+```{r}
+KM <- cumprod(1-r/n_before)
+KM
+```
+
+
+```{r}
+MCC <- cumsum(e/n_before*KM)
+MCC
+```
+
+```{r}
+for (i in 1:m){
+    
+    i <- 1
+    
+    e_temp <- get(paste("e", i, sep=""))
+    nno_before_temp <- get(paste("nno_before_", i, sep=""))
+    r_temp <- get(paste("r", i, sep=""))   
+    
+    #Calculate 'A' the first factor in CumI, which is sum from 1 to s of e/nbefore.
+    
+    A_temp <- e_temp/nno_before_temp
+    A_temp
+    A <- cumsum(A_temp)
+    A    ### I hand checked this. It seems logical.  
+    
+    #Calculate 'B' the second factor in CumI, which is product from 1 to t-1 of the complement of e/nbefore.
+    
+    B_temp <- 1-A_temp
+    B_temp
+    B <- cumprod(B_temp)
+    B
+    
+    #Calculate 'C' the third factor in CumI, which is product from 1 to t-1 of the complement of r/nbefore.
+    
+    C_temp <- r_temp/nno_before_temp
+    C_temp
+    
+    C <- cumprod(1-r_temp/nno_before_temp)
+    C
+    
+    cumi_temp <- A * B * C
+    
+    cuminame <- paste("CumI_",i,sep = "")
+    
+    assign(cuminame, cumi_temp)
+}
+
+CumI_3
+nno_before_temp
+e1
+
+A
+B
+C
+
+A*B
+A*B*C
+
+e_temp
+
+cumi_temp
+s1
+```
+
+
+
